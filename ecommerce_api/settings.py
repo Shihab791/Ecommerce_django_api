@@ -160,6 +160,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
+        'rest_framework.throttling.ScopedRateThrottle',
     ],
 
     "DEFAULT_THROTTLE_RATES": {
@@ -171,19 +172,12 @@ REST_FRAMEWORK = {
         "login": "5/minute",
         "refresh": "10/minute",
         "logout": "10/minute",
+
+        "product_write": "30/hour",
+        "wishlist_write": "60/hour",
+        "cart_write": "60/hour",
+        "address_write": "30/hour",
     },
-
-    "DEFAULT_THROTTLE_RATES": {
-    "anon": "100/hour",
-    "user": "1000/hour",
-
-    "register": "5/hour",
-    "login": "5/minute",
-    "refresh": "10/minute",
-    "logout": "10/minute",
-
-    "product_write": "30/hour",
-},
 }
 
 
