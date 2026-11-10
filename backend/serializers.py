@@ -3,7 +3,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils.html import strip_tags
 from rest_framework import serializers
 from decimal import Decimal
-from .models import UserProfile, Category, Product, WishlistItem, CartItem, Address
+from .models import UserProfile, Category, Product, WishlistItem, CartItem, Address, Order, OrderItem, Payment, Review
 import re
 from django.utils.html import strip_tags
 
@@ -614,3 +614,166 @@ class AddressSerializer(serializers.ModelSerializer):
         return value    
 
 
+class OrderItemSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = OrderItem
+
+        fields = [
+            "id",
+            "product",
+            "product_name",
+            "product_price",
+            "quantity",
+            "subtotal",
+        ]
+
+        read_only_fields = fields 
+
+class OrderSerializer(serializers.ModelSerializer):
+
+    items = OrderItemSerializer(
+        many=True,
+        read_only=True
+    )
+
+    class Meta:
+        model = Order
+
+        fields = [
+            "id",
+            "address",
+            "status",
+            "total_amount",
+            "items",
+            "created_at",
+            "updated_at",
+        ]
+
+        read_only_fields = [
+            "id",
+            "status",
+            "total_amount",
+            "items",
+            "created_at",
+            "updated_at",
+        ]           
+
+
+class OrderCreateSerializer(serializers.Serializer):
+
+    address_id = serializers.IntegerField(
+        min_value=1
+    )        
+
+
+class PaymentCreateSerializer(serializers.Serializer):
+
+    order_id = serializers.IntegerField(
+        min_value=1
+    )
+
+    payment_method = serializers.ChoiceField(
+        choices=[
+            "bkash",
+            "nagad",
+        ]
+    )
+
+class PaymentSerializer(serializers.ModelSerializer):
+
+    order_id = serializers.IntegerField(
+        source="order.id",
+        read_only=True
+    )
+
+    class Meta:
+        model = Payment
+
+        fields = [
+            "id",
+            "order_id",
+            "payment_method",
+            "amount",
+            "status",
+            "transaction_id",
+            "created_at",
+            "updated_at",
+        ]
+
+        read_only_fields = [
+            "id",
+            "order_id",
+            "amount",
+            "status",
+            "transaction_id",
+            "created_at",
+            "updated_at",
+        ]
+
+class ReviewSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(
+        source="user.username",
+        read_only=True
+    )
+
+    product_id = serializers.IntegerField(
+        source="product.id",
+        read_only=True
+    )
+
+    class Meta:
+        model = Review
+
+        fields = [
+            "id",
+            "product_id",
+            "username",
+            "rating",
+            "comment",
+            "created_at",
+            "updated_at",
+        ]
+
+        read_only_fields = [
+            "id",
+            "product_id",
+            "username",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate_rating(self, value):
+        if not isinstance(value, int):
+            raise serializers.ValidationError(
+                "Rating must be a valid number."
+            )
+
+        if value < 1 or value > 5:
+            raise serializers.ValidationError(
+                "Rating must be between 1 and 5."
+            )
+
+        return value
+
+    def validate_comment(self, value):
+        value = value.strip()
+
+        if strip_tags(value) != value:
+            raise serializers.ValidationError(
+                "HTML tags are not allowed."
+            )
+
+        return value      
+
+class AdminOrderStatusSerializer(serializers.Serializer):
+
+    status = serializers.ChoiceField(
+        choices=[
+            "pending",
+            "processing",
+            "shipped",
+            "delivered",
+            "cancelled",
+        ]
+    )      

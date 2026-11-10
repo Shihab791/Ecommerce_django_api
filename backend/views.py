@@ -1,7 +1,10 @@
 from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model
+from django.db.models import Sum
 from django.db import transaction
+from decimal import Decimal
 
-from rest_framework import generics, status, viewsets
+from rest_framework import generics, status, viewsets, serializers
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.response import Response
@@ -28,9 +31,10 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework.exceptions import ValidationError
 
-from .serializers import RegisterSerializer, UserProfileSerializer, CategorySerializer,ProductSerializer, WishlistAddSerializer, WishlistItemSerializer, CartAddSerializer, CartItemSerializer, CartUpdateSerializer, AddressSerializer
-from .models import UserProfile, Category, Product, WishlistItem, CartItem, Address
+from .serializers import RegisterSerializer, UserProfileSerializer, CategorySerializer,ProductSerializer, WishlistAddSerializer, WishlistItemSerializer, CartAddSerializer, CartItemSerializer, CartUpdateSerializer, AddressSerializer, OrderSerializer, OrderCreateSerializer, PaymentCreateSerializer, PaymentSerializer, ReviewSerializer
+from .models import UserProfile, Category, Product, WishlistItem, CartItem, Address, Order, OrderItem, Payment, Review
 
+User = get_user_model()
 
 # 1. Register API
 class RegisterView(generics.CreateAPIView):
@@ -473,4 +477,557 @@ class AddressViewSet(viewsets.ModelViewSet):
                     pk=serializer.instance.pk
                 ).update(is_default=False)
 
-            serializer.save(is_default=is_default)    
+            serializer.save(is_default=is_default)   
+
+class OrderCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "order_create"
+
+    @transaction.atomic
+    def post(self, request):
+
+        serializer = OrderCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        address_id = serializer.validated_data["address_id"]
+
+        # শুধু নিজের Address ব্যবহার করতে পারবে
+        try:
+            address = Address.objects.get(
+                id=address_id,
+                user=request.user
+            )
+        except Address.DoesNotExist:
+            return Response(
+                {"detail": "Delivery address not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Cart Items নেওয়া
+        cart_items = (
+            CartItem.objects
+            .select_related("product")
+            .filter(user=request.user)
+        )
+
+        if not cart_items.exists():
+            return Response(
+                {"detail": "Your cart is empty."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        total_amount = Decimal("0.00")
+
+        # Order তৈরি
+        order = Order.objects.create(
+            user=request.user,
+            address=address,
+            total_amount=Decimal("0.00")
+        )
+
+        for cart_item in cart_items:
+
+            product = cart_item.product
+
+            # Product active কিনা
+            if not product.is_active:
+                return Response(
+                    {
+                        "detail": (
+                            f"{product.name} is currently unavailable."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Stock check
+            if cart_item.quantity > product.stock:
+                return Response(
+                    {
+                        "detail": (
+                            f"Insufficient stock for {product.name}."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            subtotal = product.price * cart_item.quantity
+
+            OrderItem.objects.create(
+                order=order,
+                product=product,
+                product_name=product.name,
+                product_price=product.price,
+                quantity=cart_item.quantity,
+                subtotal=subtotal
+            )
+
+            total_amount += subtotal
+
+            # Stock কমানো
+            product.stock -= cart_item.quantity
+            product.save()
+
+        # Final Total
+        order.total_amount = total_amount
+        order.save()
+
+        # Order হওয়ার পরে Cart Empty
+        cart_items.delete()
+
+        return Response(
+            OrderSerializer(order).data,
+            status=status.HTTP_201_CREATED
+        )             
+
+class OrderHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+
+        orders = (
+            Order.objects
+            .filter(user=request.user)
+            .prefetch_related("items")
+            .order_by("-created_at")
+        )
+
+        serializer = OrderSerializer(
+            orders,
+            many=True
+        )
+
+        return Response(serializer.data)
+
+class PaymentCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payment_create"
+
+    @transaction.atomic
+    def post(self, request):
+
+        serializer = PaymentCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        order_id = serializer.validated_data["order_id"]
+        payment_method = serializer.validated_data[
+            "payment_method"
+        ]
+
+        # শুধু নিজের Order-এর Payment করতে পারবে
+        try:
+            order = Order.objects.get(
+                id=order_id,
+                user=request.user
+            )
+
+        except Order.DoesNotExist:
+            return Response(
+                {"detail": "Order not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Order Cancelled হলে Payment করা যাবে না
+        if order.status == "cancelled":
+            return Response(
+                {
+                    "detail": (
+                        "Payment cannot be made for "
+                        "a cancelled order."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # আগের Payment আছে কিনা
+        payment = Payment.objects.filter(
+            order=order
+        ).first()
+
+        # Payment সফল হয়ে থাকলে আবার করা যাবে না
+        if payment and payment.status == "success":
+            return Response(
+                {"detail": "This order is already paid."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # নতুন Payment Record
+        if not payment:
+
+            payment = Payment.objects.create(
+                order=order,
+                payment_method=payment_method,
+                amount=order.total_amount,
+                status="pending"
+            )
+
+        else:
+            # পুরোনো Failed/Pending Payment থাকলে update
+            payment.payment_method = payment_method
+            payment.amount = order.total_amount
+            payment.status = "pending"
+            payment.save()
+
+        return Response(
+            {
+                "detail": "Payment request created successfully.",
+                "payment": PaymentSerializer(payment).data,
+
+                # পরে এখানে provider payment URL আসবে
+                "next_step": (
+                    "Redirect to the selected payment gateway."
+                ),
+            },
+            status=status.HTTP_201_CREATED
+        ) 
+
+class PaymentStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+
+        try:
+            payment = Payment.objects.select_related(
+                "order"
+            ).get(
+                pk=pk,
+                order__user=request.user
+            )
+
+        except Payment.DoesNotExist:
+            return Response(
+                {"detail": "Payment not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        return Response(
+            PaymentSerializer(payment).data,
+            status=status.HTTP_200_OK
+        )  
+
+class ReviewCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "review_write"
+
+    def post(self, request, product_id):
+
+        # Product আছে কিনা check
+        try:
+            product = Product.objects.get(
+                id=product_id,
+                is_active=True
+            )
+        except Product.DoesNotExist:
+            return Response(
+                {"detail": "Product not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # একই User আগে Review দিয়েছে কিনা
+        if Review.objects.filter(
+            user=request.user,
+            product=product
+        ).exists():
+            return Response(
+                {
+                    "detail": (
+                        "You have already reviewed "
+                        "this product."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = ReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        review = serializer.save(
+            user=request.user,
+            product=product
+        )
+
+        return Response(
+            ReviewSerializer(review).data,
+            status=status.HTTP_201_CREATED
+        )             
+
+class ProductReviewListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, product_id):
+
+        reviews = (
+            Review.objects
+            .filter(
+                product_id=product_id,
+                product__is_active=True
+            )
+            .select_related("user")
+            .order_by("-created_at")
+        )
+
+        serializer = ReviewSerializer(
+            reviews,
+            many=True
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK
+        )  
+
+class ReviewDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "review_write"
+
+    def get_object(self, request, review_id):
+        try:
+            return Review.objects.select_related(
+                "product"
+            ).get(
+                id=review_id,
+                user=request.user
+            )
+
+        except Review.DoesNotExist:
+            return None
+
+    def patch(self, request, review_id):
+        review = self.get_object(
+            request,
+            review_id
+        )
+
+        if not review:
+            return Response(
+                {"detail": "Review not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        serializer = ReviewSerializer(
+            review,
+            data=request.data,
+            partial=True
+        )
+
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK
+        )
+
+    def delete(self, request, review_id):
+        review = self.get_object(
+            request,
+            review_id
+        )
+
+        if not review:
+            return Response(
+                {"detail": "Review not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        review.delete()
+
+        return Response(
+            {"detail": "Review deleted successfully."},
+            status=status.HTTP_200_OK
+        )      
+
+class AdminDashboardView(APIView):
+    permission_classes = [IsAdminUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "admin_dashboard"
+
+    def get(self, request):
+
+        total_users = User.objects.count()
+
+        total_products = Product.objects.count()
+
+        total_orders = Order.objects.count()
+
+        pending_orders = Order.objects.filter(
+            status="pending"
+        ).count()
+
+        processing_orders = Order.objects.filter(
+            status="processing"
+        ).count()
+
+        delivered_orders = Order.objects.filter(
+            status="delivered"
+        ).count()
+
+        # শুধু Delivered Order-এর Sales হিসাব করছি
+        total_sales = (
+            Order.objects
+            .filter(status="delivered")
+            .aggregate(
+                total=Sum("total_amount")
+            )["total"]
+            or 0
+        )
+
+        recent_orders = (
+            Order.objects
+            .select_related("user", "address")
+            .order_by("-created_at")[:10]
+        )
+
+        recent_orders_data = []
+
+        for order in recent_orders:
+            recent_orders_data.append({
+                "id": order.id,
+                "username": order.user.username,
+                "total_amount": order.total_amount,
+                "status": order.status,
+                "created_at": order.created_at,
+            })
+
+        return Response(
+            {
+                "statistics": {
+                    "total_users": total_users,
+                    "total_products": total_products,
+                    "total_orders": total_orders,
+                    "pending_orders": pending_orders,
+                    "processing_orders": processing_orders,
+                    "delivered_orders": delivered_orders,
+                    "total_sales": total_sales,
+                },
+
+                "recent_orders": recent_orders_data,
+            },
+            status=status.HTTP_200_OK
+        )  
+
+class AdminOrderListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+
+        orders = (
+            Order.objects
+            .select_related("user", "address")
+            .prefetch_related("items")
+            .order_by("-created_at")
+        )
+
+        serializer = OrderSerializer(
+            orders,
+            many=True
+        )
+
+        return Response(serializer.data)
+
+class AdminOrderStatusUpdateView(APIView):
+    permission_classes = [IsAdminUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "admin_write"
+
+    def patch(self, request, order_id):
+
+        try:
+            order = Order.objects.get(id=order_id)
+
+        except Order.DoesNotExist:
+            return Response(
+                {"detail": "Order not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        serializer = AdminOrderStatusSerializer(
+            data=request.data
+        )
+
+        serializer.is_valid(raise_exception=True)
+
+        order.status = serializer.validated_data["status"]
+        order.save()
+
+        return Response(
+            OrderSerializer(order).data,
+            status=status.HTTP_200_OK
+        )          
+
+class AdminUserListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+
+        users = (
+            User.objects
+            .all()
+            .order_by("-date_joined")
+        )
+
+        users_data = []
+
+        for user in users:
+            users_data.append({
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "is_staff": user.is_staff,
+                "is_active": user.is_active,
+                "date_joined": user.date_joined,
+            })
+
+        return Response(
+            users_data,
+            status=status.HTTP_200_OK
+        )  
+
+class AdminUserStatusSerializer(serializers.Serializer):
+
+    is_active = serializers.BooleanField()
+
+class AdminUserStatusUpdateView(APIView):
+    permission_classes = [IsAdminUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "admin_write"
+
+    def patch(self, request, user_id):
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response(
+                {"detail": "User not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Jehetu admin nijei nijer status change korte parbe na, tai ekhane check kora hocche
+        if user == request.user:
+            return Response(
+                {
+                    "detail": "You cannot change your own account status."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = AdminUserStatusSerializer(
+            data=request.data
+        )
+
+        serializer.is_valid(raise_exception=True)
+
+        user.is_active = serializer.validated_data["is_active"]
+        user.save()
+
+        return Response(
+            {
+                "detail": "User status updated successfully.",
+                "user_id": user.id,
+                "is_active": user.is_active,
+            },
+            status=status.HTTP_200_OK
+        )          

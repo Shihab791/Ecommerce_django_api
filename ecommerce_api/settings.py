@@ -18,6 +18,13 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+BKASH_BASE_URL = os.getenv("BKASH_BASE_URL")
+BKASH_USERNAME = os.getenv("BKASH_USERNAME")
+BKASH_PASSWORD = os.getenv("BKASH_PASSWORD")
+BKASH_APP_KEY = os.getenv("BKASH_APP_KEY")
+BKASH_APP_SECRET = os.getenv("BKASH_APP_SECRET")
+
+
 
 
 # Quick-start development settings - unsuitable for production
@@ -177,6 +184,13 @@ REST_FRAMEWORK = {
         "wishlist_write": "60/hour",
         "cart_write": "60/hour",
         "address_write": "30/hour",
+        "order_create": "10/hour",
+        "payment_create": "10/hour",
+        "review_write": "30/hour",
+
+        # Admin APIs
+        "admin_dashboard": "60/minute",
+        "admin_write": "60/hour",
     },
 }
 

@@ -15,6 +15,18 @@ from .views import (
     CartListCreateView,
     CartItemDetailView,
     AddressViewSet,
+    OrderCreateView,
+    OrderHistoryView,
+    PaymentCreateView,
+    PaymentStatusView,
+    ReviewCreateView,
+    ProductReviewListView,
+    ReviewDetailView,
+    AdminDashboardView,
+    AdminOrderListView,
+    AdminOrderStatusUpdateView,
+    AdminUserListView,
+    AdminUserStatusUpdateView,
 )
 
 router = DefaultRouter()
@@ -56,6 +68,30 @@ urlpatterns = [
     path("cart/",CartListCreateView.as_view(),name="cart"),
 
     path("cart/<int:pk>/",CartItemDetailView.as_view(),name="cart-item-detail"),
+
+    path("orders/create/",OrderCreateView.as_view(),name="order-create"),
+
+    path("orders/",OrderHistoryView.as_view(),name="order-history"),
+
+    path("payments/create/",PaymentCreateView.as_view(),name="payment-create"),
+
+    path("payments/<int:pk>/status/",PaymentStatusView.as_view(),name="payment-status"),
+
+    path("products/<int:product_id>/reviews/",ProductReviewListView.as_view(),name="product-review-list"),
+
+    path("products/<int:product_id>/reviews/create/",ReviewCreateView.as_view(),name="review-create"),
+
+    path("reviews/<int:review_id>/",ReviewDetailView.as_view(),name="review-detail"),
+
+    path("admin/dashboard/",AdminDashboardView.as_view(),name="admin-dashboard"),
+
+    path("admin/orders/",AdminOrderListView.as_view(),name="admin-orders"),
+
+    path("admin/orders/<int:order_id>/status/",AdminOrderStatusUpdateView.as_view(),name="admin-order-status"),
+
+    path("admin/users/",AdminUserListView.as_view(),name="admin-users"),
+
+    path("admin/users/<int:user_id>/status/",AdminUserStatusUpdateView.as_view(),name="admin-user-status"),
 ]
 
 urlpatterns += router.urls
